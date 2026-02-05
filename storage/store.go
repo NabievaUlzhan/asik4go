@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"time"
@@ -16,13 +18,20 @@ type Store struct {
 	Orders     map[int]models.Order
 	OrderItems map[int]models.OrderItem
 
+	// sessions: sessionID -> userID
+	Sessions map[string]int
+
 	nextUserID      int
 	nextProductID   int
 	nextOrderID     int
 	nextOrderItemID int
 
-	// For background processing (goroutine worker)
 	OrderQueue chan int
+}
+
+func hashPassword(pw string) string {
+	sum := sha256.Sum256([]byte(pw))
+	return hex.EncodeToString(sum[:])
 }
 
 func NewStore() *Store {
@@ -31,6 +40,7 @@ func NewStore() *Store {
 		Products:   make(map[int]models.Product),
 		Orders:     make(map[int]models.Order),
 		OrderItems: make(map[int]models.OrderItem),
+		Sessions:   make(map[string]int),
 
 		nextUserID:      1,
 		nextProductID:   1,
@@ -40,12 +50,11 @@ func NewStore() *Store {
 		OrderQueue: make(chan int, 100),
 	}
 
-	// Seed user
 	u := models.User{
 		ID:       s.nextUserID,
 		Name:     "Demo User",
 		Email:    "demo@example.com",
-		Password: "12345",
+		Password: hashPassword("12345"),
 		Role:     "customer",
 	}
 	s.Users[u.ID] = u
@@ -216,4 +225,55 @@ func (s *Store) GetUserByID(id int) (models.User, bool) {
 
 	u, ok := s.Users[id]
 	return u, ok
+}
+
+func (s *Store) GetUserByIDSafe(id int) (models.User, bool) {
+	return s.GetUserByID(id)
+}
+
+func (s *Store) CreateUser(u models.User) (models.User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, existing := range s.Users {
+		if existing.Email == u.Email {
+			return models.User{}, errors.New("email already exists")
+		}
+	}
+
+	u.ID = s.nextUserID
+	s.nextUserID++
+	s.Users[u.ID] = u
+	return u, nil
+}
+
+func (s *Store) FindUserByEmail(email string) (models.User, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, u := range s.Users {
+		if u.Email == email {
+			return u, true
+		}
+	}
+	return models.User{}, false
+}
+
+func (s *Store) CreateSession(sessionID string, userID int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Sessions[sessionID] = userID
+}
+
+func (s *Store) DeleteSession(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.Sessions, sessionID)
+}
+
+func (s *Store) GetUserIDBySession(sessionID string) (int, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	id, ok := s.Sessions[sessionID]
+	return id, ok
 }
